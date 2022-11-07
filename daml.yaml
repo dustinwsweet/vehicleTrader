@@ -1,0 +1,15 @@
+sdk-version: 2.4.0
+name: vehicleTrader
+version: 1.0.0
+source: daml
+
+dependencies:
+- daml-prim
+- daml-stdlib
+- daml-script
+
+init-script: VehicleTrader:test
+
+navigator-options:
+  - --feature-user-management=false
+ 

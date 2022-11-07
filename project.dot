@@ -1,0 +1,145 @@
+digraph G {
+compound=true;
+rankdir=LR;
+subgraph cluster_BillOfSale{
+n0[label=Create][color=green]; 
+n1[label=Archive][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>BillOfSale</b></td></tr><tr><td align="left">seller</td></tr> 
+<tr><td align="left">buyer</td></tr> 
+<tr><td align="left">titlingAgency</td></tr> 
+<tr><td align="left">vehicle.vin</td></tr> 
+<tr><td align="left">vehicle.year</td></tr> 
+<tr><td align="left">vehicle.make</td></tr> 
+<tr><td align="left">vehicle.model</td></tr> 
+<tr><td align="left">odometer</td></tr> 
+<tr><td align="left">price</td></tr> 
+<tr><td align="left">created</td></tr> 
+</table>>;color=blue
+}subgraph cluster_FraudAlert{
+n2[label=Create][color=green]; 
+n3[label=Archive][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>FraudAlert</b></td></tr><tr><td align="left">issuer</td></tr> 
+<tr><td align="left">titleTransferRequestId</td></tr> 
+</table>>;color=blue
+}subgraph cluster_Invoice{
+n4[label=Create][color=green]; 
+n5[label=ReceivePayment][color=red]; 
+n6[label=Cancel][color=red]; 
+n7[label=Archive][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>Invoice</b></td></tr><tr><td align="left">issuer</td></tr> 
+<tr><td align="left">billed</td></tr> 
+<tr><td align="left">amount</td></tr> 
+<tr><td align="left">memo</td></tr> 
+<tr><td align="left">vin</td></tr> 
+</table>>;color=blue
+}subgraph cluster_Listing{
+n8[label=Create][color=green]; 
+n9[label=MakeOffer][color=green]; 
+n10[label=Archive][color=red]; 
+n11[label=UpdateStatus][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>Listing</b></td></tr><tr><td align="left">seller</td></tr> 
+<tr><td align="left">qualifiedBuyers</td></tr> 
+<tr><td align="left">vehicle.vin</td></tr> 
+<tr><td align="left">vehicle.year</td></tr> 
+<tr><td align="left">vehicle.make</td></tr> 
+<tr><td align="left">vehicle.model</td></tr> 
+<tr><td align="left">description</td></tr> 
+<tr><td align="left">odometer</td></tr> 
+<tr><td align="left">askingPrice</td></tr> 
+<tr><td align="left">status</td></tr> 
+</table>>;color=blue
+}subgraph cluster_PurchaseOffer{
+n12[label=Create][color=green]; 
+n13[label=Accept][color=red]; 
+n14[label=Decline][color=red]; 
+n15[label=Archive][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>PurchaseOffer</b></td></tr><tr><td align="left">buyer</td></tr> 
+<tr><td align="left">seller</td></tr> 
+<tr><td align="left">bidPrice</td></tr> 
+<tr><td align="left">vin</td></tr> 
+</table>>;color=blue
+}subgraph cluster_TaxInvoice{
+n16[label=Create][color=green]; 
+n17[label=Archive][color=red]; 
+n18[label=Pay][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>TaxInvoice</b></td></tr><tr><td align="left">issuer</td></tr> 
+<tr><td align="left">payer</td></tr> 
+<tr><td align="left">payable</td></tr> 
+<tr><td align="left">memo</td></tr> 
+</table>>;color=blue
+}subgraph cluster_Title{
+n19[label=Create][color=green]; 
+n20[label=Archive][color=red]; 
+n21[label=Expire][color=red]; 
+n22[label=SetViewers][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>Title</b></td></tr><tr><td align="left">issuer</td></tr> 
+<tr><td align="left">owner</td></tr> 
+<tr><td align="left">viewers</td></tr> 
+<tr><td align="left">number</td></tr> 
+<tr><td align="left">vehicle.vin</td></tr> 
+<tr><td align="left">vehicle.year</td></tr> 
+<tr><td align="left">vehicle.make</td></tr> 
+<tr><td align="left">vehicle.model</td></tr> 
+<tr><td align="left">odometer</td></tr> 
+<tr><td align="left">created</td></tr> 
+<tr><td align="left">isActive</td></tr> 
+</table>>;color=blue
+}subgraph cluster_TitleHistory{
+n23[label=Create][color=green]; 
+n24[label=IssueNewTitle][color=red]; 
+n25[label=GetActiveTitle][color=green]; 
+n26[label=Archive][color=red]; 
+n27[label=AddViewer][color=green]; 
+n28[label=RemoveViewer][color=green]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>TitleHistory</b></td></tr><tr><td align="left">titlingAgency</td></tr> 
+<tr><td align="left">viewers</td></tr> 
+<tr><td align="left">vin</td></tr> 
+<tr><td align="left">titles</td></tr> 
+</table>>;color=blue
+}subgraph cluster_TitleTransferRequest{
+n29[label=Create][color=green]; 
+n30[label=IsFraudulent][color=green]; 
+n31[label=Approve][color=green]; 
+n32[label=Archive][color=red]; 
+label=<<table align = "left" border="0" cellborder="0" cellspacing="1">
+<tr><td align="center"><b>TitleTransferRequest</b></td></tr><tr><td align="left">currentOwner</td></tr> 
+<tr><td align="left">newOwner</td></tr> 
+<tr><td align="left">titlingAgency</td></tr> 
+<tr><td align="left">billOfSaleId</td></tr> 
+<tr><td align="left">created</td></tr> 
+</table>>;color=blue
+}n5->n0
+n5->n29
+n5->n10
+n6->n11
+n9->n12
+n11->n8
+n13->n4
+n13->n11
+n21->n19
+n22->n19
+n24->n19
+n24->n23
+n24->n21
+n27->n23
+n27->n22
+n27->n26
+n28->n23
+n28->n22
+n28->n26
+n30->n2
+n30->n25
+n31->n16
+n31->n25
+n31->n24
+n31->n32
+
+}

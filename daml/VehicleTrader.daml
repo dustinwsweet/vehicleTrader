@@ -1,0 +1,594 @@
+{-# LANGUAGE ApplicativeDo #-}
+module VehicleTrader where
+
+import Daml.Script
+import DA.Assert
+import DA.List
+
+data Vehicle = Vehicle
+  with
+    vin : Text
+    year : Int
+    make : Text
+    model : Text
+  deriving (Eq, Show)
+
+data ListingStatus = AcceptingOffers | PendingSale deriving (Eq, Show, Ord)
+
+{-
+  An advertisement for the sale of a vehicle.
+-}
+template Listing
+  with
+    seller : Party
+    qualifiedBuyers : [Party]
+    vehicle : Vehicle
+    description : Text
+    odometer : Int    
+    askingPrice : Decimal
+    status : ListingStatus
+  where
+    signatory seller
+    observer qualifiedBuyers
+
+    -- seller is allowed a single listing per vehicle
+    key (seller, vehicle.vin) : (Party, Text)
+    maintainer key._1
+
+    -- only those buyers previously qualified are allowed to make an offer
+    nonconsuming choice MakeOffer : ContractId PurchaseOffer
+      with
+        buyer : Party
+        bidPrice : Decimal
+      controller buyer
+      do
+        assertMsg "not a qualified buyer" $ buyer `elem` qualifiedBuyers
+        create PurchaseOffer with
+          buyer
+          seller
+          bidPrice
+          vin = vehicle.vin
+
+    choice UpdateStatus : ContractId Listing
+      with
+        newStatus : ListingStatus
+      controller seller
+      do
+        create this with status = newStatus
+
+{-
+  An offer to buy a vehicle, made by a qualified buyer
+  in response to a listing advertisement.
+-}
+template PurchaseOffer
+  with
+    buyer : Party
+    seller : Party
+    bidPrice : Decimal    
+    vin : Text
+  where
+    signatory buyer
+    observer seller
+
+    choice Accept : ContractId Invoice
+      controller seller
+      do
+        (listingId, listing) <- fetchByKey @Listing (seller, vin)
+
+        -- seller has accepted the offer, but the sale is pending
+        -- until the buyer has paid the invoice
+        exercise listingId UpdateStatus with
+          newStatus = PendingSale
+
+        -- Note: This is an exclusive vehicle selling platform in which
+        -- CASH-ONLY buyers are rigorously pre-qualified. In exchange for
+        -- having access to sales at exceptional discounts, they are expected
+        -- to buy the vehicles SIGHT UNSEEN.
+        let vehicle = listing.vehicle
+        create Invoice with
+          issuer = seller
+          billed = buyer
+          amount = bidPrice
+          vin = vehicle.vin
+          memo = "For purchase of " <> show vehicle.year <> " " <> vehicle.make <> " " <> vehicle.model
+            <> " with " <> show listing.odometer <> " miles."          
+
+    choice Decline : ()
+      controller seller
+      do
+        return ()
+
+{-
+  A bill sent by the seller of a vehicle to a buyer
+  whose purchase offer the seller has just accepted.
+-}
+template Invoice
+  with
+    issuer : Party
+    billed : Party
+    amount : Decimal
+    memo : Text
+    vin : Text
+  where
+    signatory issuer, billed
+
+    -- Invoice settlement occurs off-chain or in some other worflow
+    -- Assume the seller will have received full proceeds before they exercise this choice
+    choice ReceivePayment : (ContractId BillOfSale, ContractId TitleTransferRequest)
+      with
+        titlingAgency : Party    
+      controller issuer
+      do
+        (listingId, listing) <- fetchByKey @Listing (issuer, vin)
+
+        -- Issue bill of sale to the buyer. Make it visible to the titling agency
+        -- so that they're able to validate the subsequent title transfer request.
+        currentTime <- getTime
+        billOfSaleId <- create BillOfSale with
+          seller = issuer
+          buyer = billed
+          titlingAgency
+          vehicle = listing.vehicle
+          odometer = listing.odometer
+          price = amount
+          created = currentTime
+
+        -- The title transfer request acts as an immediate "release of liability" for the seller who no
+        -- longer retains physical possession of the vehicle. It may take the titling agency several
+        -- business days to actually process the transfer.
+        titleTransferRequestId <- create TitleTransferRequest with
+          currentOwner = issuer
+          newOwner = billed
+          titlingAgency
+          billOfSaleId
+          created = currentTime
+
+        -- The listing is no longer needed
+        archive listingId
+       
+        return (billOfSaleId, titleTransferRequestId)
+  
+    -- The listing remains active (but in 'pending sale' state) until payment is received.
+    -- If the buyer fails to settle the invoice, the seller can simply cancel it and reset
+    -- the status to indicate new purchase offers will be considered.
+    choice Cancel : ContractId Listing
+      controller issuer
+      do
+        (listingId, listing) <- fetchByKey @Listing (issuer, vin)
+
+        exercise listingId UpdateStatus with
+          newStatus = AcceptingOffers        
+       
+{-
+  Legal document that outlines the terms of the deal and serves as proof
+  that the vehicle was sold. The titling agency requires it to be signed
+  by both the buyer and seller before a new title can be issued.
+-}
+template BillOfSale
+  with
+    seller : Party
+    buyer : Party
+    titlingAgency: Party
+    vehicle : Vehicle
+    odometer : Int
+    price : Decimal
+    created: Time
+  where
+    signatory seller, buyer
+    observer titlingAgency
+
+{-
+  An official request made to the titling agency by both the buyer and seller of a vehicle
+  for acknowledgement of the transaction and issuance of a new title to the buyer.
+-}
+template TitleTransferRequest
+  with
+    currentOwner : Party
+    newOwner : Party
+    titlingAgency : Party    
+    billOfSaleId : ContractId BillOfSale
+    created : Time
+  where
+    signatory currentOwner, newOwner
+    observer titlingAgency
+
+    nonconsuming choice IsFraudulent : Bool
+      controller titlingAgency
+      do
+        -- Make sure the submitter passed in a valid bill of sale
+        billOfSale <- fetch billOfSaleId
+        billOfSale.seller === currentOwner
+        billOfSale.buyer === newOwner
+
+        -- Pull the title history
+        (titleHistoryId, _) <- fetchByKey @TitleHistory (titlingAgency, billOfSale.vehicle.vin)
+        activeTitle <- exercise titleHistoryId GetActiveTitle
+
+        -- Trigger a fraud alert if the submitter of the transfer request doesn't hold the active title 
+        if activeTitle.owner /= currentOwner then do
+          create FraudAlert with
+            issuer = titlingAgency
+            titleTransferRequestId = self
+
+          return True
+        else do
+          return False        
+
+    nonconsuming choice Approve : (ContractId Title, ContractId TaxInvoice)
+      controller titlingAgency
+      do
+        -- Make sure the submitter passed in a valid bill of sale
+        billOfSale <- fetch billOfSaleId
+        billOfSale.seller === currentOwner
+        billOfSale.buyer === newOwner
+
+        -- Pull the title history
+        (titleHistoryId, _) <- fetchByKey @TitleHistory (titlingAgency, billOfSale.vehicle.vin)
+        activeTitle <- exercise titleHistoryId GetActiveTitle
+
+        -- Issue the new title and update the title history
+        titleId <- exercise titleHistoryId IssueNewTitle with
+          owner = newOwner
+          odometer = billOfSale.odometer
+
+        -- Issue invoice for sales tax, which is due upon transfer of
+        -- title and is to be paid to the state by the buyer.
+        let vehicle = billOfSale.vehicle
+        taxInvoiceId <- create TaxInvoice with
+          issuer = titlingAgency
+          payer = newOwner
+          payable = billOfSale.price * 0.06
+          memo = "State sales tax on purchase of " <> show vehicle.year <> " " <> vehicle.make <> " " <> vehicle.model
+
+        archive self    
+
+        return (titleId, taxInvoiceId)
+
+{-
+  A 'flag' to mark suspicious title transfer requests
+  for further investigation of possible fraud.
+  Visible only to the issuer.
+-}
+template FraudAlert
+  with
+    issuer : Party
+    titleTransferRequestId : ContractId TitleTransferRequest
+  where
+    signatory issuer
+
+{-
+  A legal document that serves as proof of ownership of a vehicle.
+  Note: By default the title is visible only to the issuer and owner.
+  However, the titling agency allows any individual to purchase the
+  right to view any Title.
+-}   
+template Title
+  with
+    issuer : Party
+    owner : Party
+    viewers : [Party]
+    number: Int
+    vehicle : Vehicle
+    odometer : Int
+    created : Time
+    isActive : Bool
+  where
+    signatory issuer
+    observer owner :: viewers
+
+    choice Expire : ContractId Title
+      controller issuer
+      do
+        create this with isActive = False
+
+    choice SetViewers : ContractId Title
+      with
+        updatedViewers : [Party]
+      controller issuer
+      do
+        create this with
+          viewers = updatedViewers            
+
+{-
+  The full title history for a vehicle.
+  By state law the titling agency is required to maintain
+  these records, and to make them availabe to anyone
+  upon request (for a fee).
+-} 
+template TitleHistory
+  with
+    titlingAgency : Party
+    viewers : [Party]    
+    vin : Text
+    titles : [ContractId Title]
+  where
+    signatory titlingAgency
+    observer viewers
+    ensure not (null titles)
+
+    key (titlingAgency, vin) : (Party, Text)
+    maintainer key._1
+
+    -- The 'active' title is maintained at the head of the list
+    -- and is further identified by the 'isActive = true' field.
+    nonconsuming choice GetActiveTitle : Title
+      controller titlingAgency
+      do
+        length titles =/= 0
+        fetch $ head titles
+
+    choice IssueNewTitle : ContractId Title
+      with
+        owner : Party
+        odometer : Int
+      controller titlingAgency
+      do
+        -- expire the previous title and add the new one
+        previousTitleId <- exercise (head titles) Expire
+        previousTitle <- fetch previousTitleId
+
+        currentTime <- getTime
+        titleId <- create Title with 
+          issuer = titlingAgency
+          owner
+          viewers
+          number = previousTitle.number + 1
+          vehicle = previousTitle.vehicle
+          odometer
+          created = currentTime
+          isActive = True        
+      
+        create this with
+          titles = titleId :: previousTitleId :: tail titles        
+
+        return titleId
+
+    -- Add a new viewer (if not already exists)
+    -- Note this choice is conditionally consuming.
+    nonconsuming choice AddViewer : ContractId TitleHistory
+      with
+        viewer : Party
+      controller titlingAgency
+      do
+        if viewer `notElem` viewers then do
+          let updatedViewers = viewer :: viewers
+          updatedTitles <- forA titles (\title -> exercise title SetViewers with updatedViewers)
+
+          archive self
+          create this with
+            titles = updatedTitles
+            viewers = updatedViewers
+        else
+          return self       
+
+    -- Remove a viewer (if existing)
+    -- Note this choice is conditionally consuming.    
+    nonconsuming choice RemoveViewer : ContractId TitleHistory
+      with
+        viewer : Party
+      controller titlingAgency
+      do
+        if viewer `elem` viewers then do
+          let updatedViewers = delete viewer viewers
+          updatedTitles <- forA titles (\title -> exercise title SetViewers with updatedViewers)
+
+          archive self
+          create this with
+            titles = updatedTitles
+            viewers = updatedViewers
+        else
+          return self 
+
+{-
+  A bill for payment of state sales tax, to be paid
+  to the titling agency by the vehicle buyer.
+-} 
+template TaxInvoice
+  with
+    issuer : Party
+    payer : Party
+    payable : Decimal
+    memo : Text
+  where
+    signatory issuer
+    observer payer
+
+    choice Pay : ()
+      with
+        amount : Decimal
+      controller payer
+      do
+        amount === payable
+        return ()
+   
+
+test : Script ()
+test = script do
+
+-- TEST SETUP 
+  -- Department of Motor Vehicles
+  dmv <- allocatePartyWithHint "DMV" (PartyIdHint "DMV")
+
+  -- Dealership
+  dealership <- allocatePartyWithHint "Dealership" (PartyIdHint "Dealership")
+
+  -- Qualified Buyers
+  scammer <- allocatePartyWithHint "Scammer" (PartyIdHint "Scammer")
+  legitBuyer <- allocatePartyWithHint "LegitBuyer" (PartyIdHint "LegitBuyer")
+  legitBuyer2 <- allocatePartyWithHint "LegitBuyer2" (PartyIdHint "LegitBuyer2")
+
+  -- Unqualified Buyer
+  uqBuyer <- allocatePartyWithHint "UQBuyer" (PartyIdHint "UQBuyer")
+
+  let vehicle = Vehicle {
+    vin = "12345",
+    year = 2020,    
+    make = "Toyota",
+    model = "Corolla"
+  }
+
+  -- The dealership has a special arrangement with the DMV
+  -- for quickly issuing the initial title on new cars.
+  currentTime <- getTime
+  initialTitleId <- submit dmv do
+    createCmd Title with
+      issuer = dmv
+      owner = dealership
+      viewers = []
+      number = 1
+      vehicle
+      odometer = 3
+      created = currentTime
+      isActive = True
+
+  submit dmv do
+    createCmd TitleHistory with
+      titlingAgency = dmv
+      viewers = []
+      vin = vehicle.vin
+      titles = [initialTitleId]
+
+-- END TEST SETUP
+
+-- LEGIT FIRST SALE (HAPPY PATH)
+
+  -- dealer lists the vehicle for sale
+  currentTime <- getTime
+  listingId <- submit dealership do
+    createCmd Listing with
+      seller = dealership
+      qualifiedBuyers = [scammer, legitBuyer, legitBuyer2]
+      vehicle
+      description = "Runs great"
+      odometer = 27
+      askingPrice = 22995.00
+      status = AcceptingOffers
+
+  -- two "qualified" buyers respond with offers...
+  greatOfferId <- submit scammer do
+    exerciseCmd listingId MakeOffer with
+      buyer = scammer
+      bidPrice = 21500.00
+
+  lowballOfferId <- submit legitBuyer do
+    exerciseCmd listingId MakeOffer with
+      buyer = legitBuyer
+      bidPrice = 18750.00      
+
+  -- ...plus an unqualified buyer tries to make an offer, but fails
+  submitMustFail uqBuyer do
+    exerciseCmd listingId MakeOffer with
+      buyer = uqBuyer
+      bidPrice = 20000.00
+
+  -- dealer rejects the lowball offer from the legit buyer...
+  submit dealership do
+    exerciseCmd lowballOfferId Decline
+
+  -- ...but accepts the great one (from the scammer), and issues an invoice
+  firstInvoiceId <- submit dealership do
+    exerciseCmd greatOfferId Accept
+
+  -- However, the buyer (being a scammer) fails to pay,
+  -- so the dealer cancels the invoice and reopens the listing to new offers.
+  listingId <- submit dealership do
+    exerciseCmd firstInvoiceId Cancel
+
+  -- Our original lowballer (legit buyer) is back - this time with a much better offer.
+  secondOfferId <- submit legitBuyer do
+    exerciseCmd listingId MakeOffer with
+      buyer = legitBuyer
+      bidPrice = 21750.00
+
+  -- The offer is accepted.
+  secondInvoiceId <- submit dealership do
+    exerciseCmd secondOfferId Accept
+
+  -- And this time the buyer quickly pays the invoice (off-chain).
+  (billOfSaleId, titleTransferRequestId) <- submit dealership do
+    exerciseCmd secondInvoiceId ReceivePayment with
+      titlingAgency = dmv
+
+  -- The DMV determines the request is not fraudulent, and therefore
+  -- approves the title transfer request and issues a new title
+  fraudulent <- submit dmv do
+    exerciseCmd titleTransferRequestId IsFraudulent
+
+  if not fraudulent
+    then do
+      (titleId, taxInvoiceId) <- submit dmv do
+        exerciseCmd titleTransferRequestId Approve
+
+      -- The buyer makes a mistake and underpays tax, but it's not allowed
+      submitMustFail legitBuyer do
+        exerciseCmd taxInvoiceId Pay with
+          amount = 500.00
+
+      -- With a correct payment the sales tax invoice is satisfied
+      submit legitBuyer do
+        exerciseCmd taxInvoiceId Pay with
+          amount = 1305.00
+    else do
+      pure ()
+
+-- END LEGIT FIRST SALE
+
+-- FRAUD ATTEMPT ...
+
+  -- After a few months, the scammer attempts to sell the car (which of course he doesn't own)...
+  -- Notice he even allows the unqualified buyer to participate
+
+  -- scam listing is created
+  currentTime <- getTime
+  scamListingId <- submit scammer do
+    createCmd Listing with
+      seller = scammer
+      qualifiedBuyers = [legitBuyer2, uqBuyer]
+      vehicle
+      description = "At this price, this car is a steal!"
+      odometer = 5326
+      askingPrice = 14999.99
+      status = AcceptingOffers
+
+  -- unqualified buyer offers full asking price...
+  fullOfferId <- submit uqBuyer do
+    exerciseCmd scamListingId MakeOffer with
+      buyer = uqBuyer
+      bidPrice = 14999.99
+
+  -- ...and the scammer quickly accepts.
+  scamInvoiceId <- submit scammer do
+    exerciseCmd fullOfferId Accept
+
+  -- the buyer settles the scam invoice (off-chain).
+  -- a scam bill of sale is created, along with an official title transfer request...
+  (scamBillOfSaleId, scamTitleTransferRequestId) <- submit scammer do
+    exerciseCmd scamInvoiceId ReceivePayment with
+      titlingAgency = dmv
+
+  -- This time the DMV sees that the submitter of the title transfer request
+  -- does not hold the current title. A fraud alert is created for further
+  -- investigation and the transfer is NOT approved.
+  fraudulent <- submit dmv do
+    exerciseCmd scamTitleTransferRequestId IsFraudulent
+
+  if fraudulent
+    then do
+      -- TODO: launch fraud investigation workflow
+      pure ()
+    else do
+      -- Won't execute
+      assert False
+
+  -- Puzzled as to why the transfer request was denied, the unqualified buyer
+  -- buys the right from the titling agency (off-chain) to view the entire title
+  -- history of the vehicle.
+  submit dmv do
+    exerciseByKeyCmd @TitleHistory (dmv, vehicle.vin) AddViewer with
+      viewer = uqBuyer
+
+-- END FRAUD ATTEMPT
+
+    
+
+  pure ()
